@@ -125,7 +125,7 @@ def get_sm(path):
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    return (_here / "quant_viewer.html").read_text()
+    return (_here / "viewer.html").read_text()
 
 
 @app.get("/api/browse")
