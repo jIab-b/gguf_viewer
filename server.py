@@ -1,127 +1,192 @@
 #!/usr/bin/env python3
-"""Thin FastAPI server for the tensor viewer. All heavy logic lives in gpu_quant."""
+"""GGUF tensor viewer — local files only, no external dependencies beyond numpy/fastapi."""
 
 import re
+import struct
 from pathlib import Path
 
 import numpy as np
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 
-import sys
 _here = Path(__file__).resolve().parent
-_parent = _here.parent
-if str(_parent) not in sys.path:
-    sys.path.insert(0, str(_parent))
-import gpu_quant as Q
 app = FastAPI()
 
-# ── Model cache ───────────────────────────────────────────────────────
-_cache = {}  # path -> {"src": source_or_None, "metas": [TensorMeta], "fmt": str}
+
+# ── GGUF parsing ─────────────────────────────────────────────────────
+
+GGUF_MAGIC = 0x46554747
+
+# From ggml: (block_size, type_size) per quant type enum value
+# Only the types we need for reading headers + dequanting BF16/F16/F32
+GGML_TYPES = {
+    0: ("F32", 1, 4),    1: ("F16", 1, 2),   30: ("BF16", 1, 2),
+    2: ("Q4_0", 32, 18), 3: ("Q4_1", 32, 20), 6: ("Q5_0", 32, 22),
+    7: ("Q5_1", 32, 24), 8: ("Q8_0", 32, 34), 9: ("Q8_1", 32, 40),
+    10: ("Q2_K", 256, 84), 11: ("Q3_K", 256, 110), 12: ("Q4_K", 256, 144),
+    13: ("Q5_K", 256, 176), 14: ("Q6_K", 256, 210), 15: ("Q8_K", 256, 292),
+    16: ("IQ2_XXS", 256, 66), 17: ("IQ2_XS", 256, 74),
+    28: ("Q4_0_4_4", 32, 18), 29: ("Q4_0_4_8", 32, 18),
+    31: ("NVFP4", 64, 36),
+}
 
 
-def _open_remote(path):
-    """Open an HF repo or remote URL, caching shard metadata."""
-    import requests as http_requests
+class TensorMeta:
+    def __init__(self, name, shape, dtype, n_bytes, data_offset):
+        self.name, self.shape, self.dtype = name, shape, dtype
+        self.n_bytes, self.data_offset = n_bytes, data_offset
 
-    repo_id = Q.extract_repo_id(path) if hasattr(Q, "extract_repo_id") else None
-    if repo_id:
-        url = f"https://huggingface.co/api/models/{repo_id}"
-        siblings = http_requests.get(url, timeout=60).json().get("siblings", [])
-        st_files = sorted(s["rfilename"] for s in siblings if s["rfilename"].endswith(".safetensors"))
-        if not st_files:
-            raise ValueError(f"No .safetensors in repo {repo_id}")
+    @property
+    def type_name(self):
+        info = GGML_TYPES.get(self.dtype)
+        return info[0] if info else f"UNKNOWN({self.dtype})"
 
-        # Try index for lightweight tensor list
-        idx_url = f"https://huggingface.co/{repo_id}/resolve/main/model.safetensors.index.json"
-        weight_map = {}
-        try:
-            r = http_requests.get(idx_url, timeout=30)
-            r.raise_for_status()
-            weight_map = r.json().get("weight_map", {})
-        except Exception:
-            pass
-
-        all_tensors = []
-        shard_cache = {}
-        if weight_map:
-            for tname, shard in weight_map.items():
-                all_tensors.append(Q.TensorMeta(tname, [], "?", 0, 0, source=None))
-                shard_cache.setdefault(shard, []).append(tname)
-
-        _cache[path] = {"src": None, "metas": all_tensors, "fmt": "repo",
-                        "repo_id": repo_id, "weight_map": weight_map,
-                        "shard_cache": {}, "shard_parsed": {}}
-        return None, all_tensors
-
-    # Direct remote file
-    resolved = Q.resolve_url(path)
-    src = Q.HTTPSource(resolved)
-    if ".safetensors" in resolved.lower():
-        tensors, _ = Q.parse_safetensors_header(src)
-    else:
-        tensors, _ = Q.parse_gguf_header(src)
-    _cache[path] = {"src": src, "metas": tensors, "fmt": "remote"}
-    return src, tensors
+    @property
+    def n_elements(self):
+        r = 1
+        for s in self.shape:
+            r *= s
+        return r
 
 
-def _resolve_repo_tensor(path, name):
-    """Lazy-parse a shard to resolve a placeholder tensor in a repo."""
-    import requests as http_requests
-    c = _cache.get(path)
-    if not c or c["fmt"] != "repo":
-        return None
-    shard_name = c["weight_map"].get(name)
-    if not shard_name:
-        return None
-    if shard_name not in c["shard_parsed"]:
-        url = f"https://huggingface.co/{c['repo_id']}/resolve/main/{shard_name}"
-        src = Q.HTTPSource(url)
-        ts, _ = Q.parse_safetensors_header(src)
-        for t in ts:
-            t.source = src
-        c["shard_parsed"][shard_name] = {t.name: t for t in ts}
-        # Update main metas list
-        parsed = c["shard_parsed"][shard_name]
-        for i, m in enumerate(c["metas"]):
-            if m.name in parsed:
-                c["metas"][i] = parsed[m.name]
-    parsed = c["shard_parsed"].get(shard_name, {})
-    return parsed.get(name)
+def parse_gguf(path):
+    """Parse a GGUF file header. Returns list of TensorMeta."""
+    with open(path, "rb") as f:
+        buf = bytearray(f.read(10 * 1024 * 1024))
+    pos = 0
+
+    def ensure(n):
+        nonlocal buf
+        if pos + n > len(buf):
+            with open(path, "rb") as f:
+                f.seek(len(buf))
+                buf.extend(f.read(max(n, 4 * 1024 * 1024)))
+
+    def u32():
+        nonlocal pos; ensure(4); v = struct.unpack_from("<I", buf, pos)[0]; pos += 4; return v
+    def u64():
+        nonlocal pos; ensure(8); v = struct.unpack_from("<Q", buf, pos)[0]; pos += 8; return v
+    def read_str():
+        nonlocal pos; length = u64(); ensure(length)
+        s = buf[pos:pos+length].decode("utf-8"); pos += length; return s
+
+    VAL_SIZES = {0:1, 1:1, 2:2, 3:2, 4:4, 5:4, 6:4, 7:1, 10:8, 11:8, 12:8}
+    def skip_value(vtype):
+        nonlocal pos
+        if vtype == 8: read_str()
+        elif vtype == 9:
+            et = u32(); cnt = u64()
+            for _ in range(cnt): skip_value(et)
+        else:
+            sz = VAL_SIZES.get(vtype)
+            if sz is None: raise ValueError(f"Unknown GGUF value type {vtype}")
+            ensure(sz); pos += sz
+
+    if u32() != GGUF_MAGIC:
+        raise ValueError("Not a GGUF file")
+    u32()  # version
+    tc, kc = u64(), u64()
+    for _ in range(kc):
+        read_str(); skip_value(u32())
+
+    tensors = []
+    for _ in range(tc):
+        name = read_str()
+        nd = u32()
+        shape = [u64() for _ in range(nd)]
+        dtype = u32()
+        offset = u64()
+        info = GGML_TYPES.get(dtype)
+        if info:
+            bs, ts = info[1], info[2]
+        else:
+            bs, ts = 1, 1
+        ne = 1
+        for s in shape:
+            ne *= s
+        tensors.append(TensorMeta(name, shape, dtype, ne * ts // bs, offset))
+
+    alignment = 32
+    ds = pos + (alignment - pos % alignment) % alignment
+    for t in tensors:
+        t.data_offset = ds + t.data_offset
+    return tensors
 
 
-def get_sm(path):
-    """Get (source, metas) for a path, with caching."""
+def fetch_raw(path, meta):
+    with open(path, "rb") as f:
+        f.seek(meta.data_offset)
+        return np.frombuffer(f.read(meta.n_bytes), dtype=np.uint8)
+
+
+# ── E2M1 / UE4M3 for NVFP4 dequant ─────────────────────────────────
+E2M1_POS = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32)
+E2M1_TABLE = np.zeros(16, dtype=np.float32)
+E2M1_TABLE[:8] = E2M1_POS
+E2M1_TABLE[8:] = -E2M1_POS
+
+
+def ue4m3_decode(code):
+    code = code.astype(np.uint8) & 0x7F
+    exp = (code >> 3).astype(np.int32)
+    m = (code & 0x07).astype(np.float32)
+    out = np.zeros(code.shape, dtype=np.float32)
+    s = exp == 0
+    out[s] = m[s] / 8.0 * (2.0 ** -6)
+    n = exp > 0
+    out[n] = (1.0 + m[n] / 8.0) * (2.0 ** (exp[n] - 7).astype(np.float32))
+    return out
+
+
+def dequant_nvfp4(raw, scale2=1.0):
+    flat = raw.reshape(-1, 36)
+    n = flat.shape[0]
+    scales = ue4m3_decode(flat[:, :4])
+    qs = flat[:, 4:]
+    lo = (qs & 0x0F).astype(np.uint8)
+    hi = (qs >> 4).astype(np.uint8)
+    codes = np.empty((n, 64), dtype=np.uint8)
+    codes[:, 0::2] = lo
+    codes[:, 1::2] = hi
+    vals = E2M1_TABLE[codes].reshape(n, 4, 16)
+    vals *= scales[:, :, np.newaxis]
+    return vals.reshape(-1) * scale2
+
+
+def to_f32(raw, dtype, metas=None, name=None, path=None):
+    """Convert raw bytes to float32."""
+    info = GGML_TYPES.get(dtype)
+    tname = info[0] if info else None
+    if tname == "F32":  return raw.view(np.float32)
+    if tname == "BF16": return (raw.view(np.uint16).astype(np.uint32) << 16).view(np.float32)
+    if tname == "F16":  return raw.view(np.float16).astype(np.float32)
+    if tname == "NVFP4":
+        s2 = 1.0
+        if metas and name and path:
+            sn = name.replace(".weight", ".scale")
+            for m in metas:
+                if m.name == sn:
+                    s2 = fetch_raw(path, m).view(np.float32)[0]; break
+        return dequant_nvfp4(raw, s2)
+    return raw.astype(np.float32)
+
+
+# ── Model cache ──────────────────────────────────────────────────────
+_cache = {}  # path -> {"metas": [TensorMeta]}
+
+
+def get_metas(path):
     if path in _cache:
-        c = _cache[path]
-        return c["src"], c["metas"]
-
-    # Local dir
-    p = Path(path).expanduser().resolve() if not path.startswith("http") else None
-    if p and p.is_dir():
-        src, metas = Q.open_model(str(p))
-        _cache[path] = {"src": src, "metas": metas, "fmt": "local_dir"}
-        return src, metas
-
-    # Local file
-    if p and p.exists():
-        src, metas = Q.open_model(str(p))
-        _cache[path] = {"src": src, "metas": metas, "fmt": "local"}
-        return src, metas
-
-    # Remote / repo
-    repo_id = None
-    if not path.startswith("http"):
-        m = re.match(r"^([^/]+/[^/]+)$", path)
-        if m:
-            repo_id = m.group(1)
-    if path.startswith("http") or repo_id:
-        return _open_remote(path)
-
-    raise ValueError(f"Cannot open: {path}")
+        return _cache[path]
+    p = Path(path).expanduser().resolve()
+    if not p.exists() or not str(p).lower().endswith(".gguf"):
+        raise ValueError(f"Not a GGUF file: {path}")
+    metas = parse_gguf(str(p))
+    _cache[path] = metas
+    return metas
 
 
-# ── API routes ────────────────────────────────────────────────────────
+# ── API routes ───────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
@@ -140,14 +205,13 @@ async def browse(dir: str = Query(".")):
         children = sorted(p.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
     except PermissionError:
         return JSONResponse({"error": f"Permission denied: {dir}"}, 403)
-    exts = {".gguf", ".safetensors"}
     for child in children:
         if child.name.startswith("."):
             continue
         if child.is_dir():
-            has = any(child.glob("*.gguf")) or any(child.glob("*.safetensors"))
+            has = any(child.glob("*.gguf"))
             items.append({"name": child.name + "/", "path": str(child), "type": "dir", "has_gguf": has})
-        elif child.suffix in exts:
+        elif child.suffix == ".gguf":
             sz = child.stat().st_size
             s = f"{sz/1048576:.1f} MB" if sz < 1073741824 else f"{sz/1073741824:.2f} GB"
             items.append({"name": child.name, "path": str(child), "type": "file", "size": sz, "size_str": s})
@@ -157,13 +221,13 @@ async def browse(dir: str = Query(".")):
 @app.get("/api/open")
 async def open_file(path: str = Query(...)):
     try:
-        src, tensors = get_sm(path)
+        metas = get_metas(path)
     except Exception as e:
         return JSONResponse({"error": str(e)}, 400)
 
     blocks = {}
-    for t in tensors:
-        m = re.match(r"(blk\.\d+)", t.name) or re.match(r"(model\.layers\.\d+)", t.name)
+    for t in metas:
+        m = re.match(r"(blk\.\d+)", t.name)
         key = m.group(1) if m else "other"
         suf = t.name[len(key)+1:] if m else t.name
         blocks.setdefault(key, []).append({
@@ -173,7 +237,7 @@ async def open_file(path: str = Query(...)):
 
     def bk(k):
         if k == "other": return (1, 0)
-        m = re.match(r"(?:blk|model\.layers)\.(\d+)", k)
+        m = re.match(r"blk\.(\d+)", k)
         return (0, int(m.group(1))) if m else (1, 0)
 
     result = []
@@ -183,57 +247,32 @@ async def open_file(path: str = Query(...)):
         for t in ts: types[t["type"]] = types.get(t["type"], 0) + 1
         result.append({"name": key, "n_tensors": len(ts), "total_bytes": sum(t["bytes"] for t in ts),
                         "types": types, "tensors": ts})
-    return {"path": path, "n_tensors": len(tensors), "blocks": result}
+    return {"path": path, "n_tensors": len(metas), "blocks": result}
 
 
 @app.get("/api/tensor")
 async def get_tensor(path: str = Query(...), name: str = Query(...),
-                     offset: int = Query(0), limit: int = Query(500),
-                     mode: str = Query("local")):
+                     offset: int = Query(0), limit: int = Query(500)):
     try:
-        src, metas = get_sm(path)
+        metas = get_metas(path)
     except Exception as e:
         return JSONResponse({"error": str(e)}, 400)
 
     meta = next((m for m in metas if m.name == name), None)
     if not meta:
         return JSONResponse({"error": f"Not found: {name}"}, 404)
-    if meta.n_bytes == 0:
-        resolved = _resolve_repo_tensor(path, name)
-        if resolved:
-            meta = resolved
-        else:
-            return JSONResponse({"error": f"Could not resolve: {name}"}, 404)
 
-    total = meta.n_elements
-    if mode == "web":
-        raw_slice = Q.fetch_raw_slice(src, meta, offset, limit)
-        chunk = Q.to_f32(raw_slice, meta.dtype, metas, name, src)[:limit]
-        sample_size = min(50000, total)
-        sample_start = max(0, (total - sample_size) // 2)
-        raw_sample = Q.fetch_raw_slice(src, meta, sample_start, sample_size)
-        sample = Q.to_f32(raw_sample, meta.dtype, metas, name, src)
-        sample = sample[np.isfinite(sample)]
-        code_dist = None
+    raw = fetch_raw(path, meta)
+    values = to_f32(raw, meta.dtype, metas, name, path)
+    total = len(values)
+    chunk = values[offset:offset + limit]
+
+    max_sample = 300000
+    if total > max_sample:
+        sample = values[np.random.default_rng(42).choice(total, max_sample, replace=False)]
     else:
-        raw = Q.fetch_raw(src, meta)
-        values = Q.to_f32(raw, meta.dtype, metas, name, src)
-        total = len(values)
-        chunk = values[offset:offset + limit]
-        max_sample = 300000
-        if total > max_sample:
-            sample = values[np.random.default_rng(42).choice(total, max_sample, replace=False)]
-        else:
-            sample = values
-        sample = sample[np.isfinite(sample)]
-        code_dist = None
-        if Q.NVFP4_TYPE is not None and not isinstance(meta.dtype, str) and Q.safe_ggml_type(meta.dtype) == Q.NVFP4_TYPE:
-            flat = raw.reshape(-1, 36)
-            qs = flat[:, 4:]
-            lo = (qs & 0x0F).flatten(); hi = (qs >> 4).flatten()
-            u, cc = np.unique(np.concatenate([lo, hi]), return_counts=True)
-            code_dist = {"codes": u.tolist(), "counts": cc.tolist(),
-                         "labels": [f"{Q.E2M1_TABLE[c]:.1f}" for c in u]}
+        sample = values
+    sample = sample[np.isfinite(sample)]
 
     hc, he = (np.histogram(sample, bins=150) if len(sample) > 0 else (np.array([]), np.array([])))
     stats = {}

@@ -108,15 +108,8 @@
 <body>
 
 <div class="bar">
-  <select id="mode" onchange="modeChanged()">
-    <option value="local">Local</option>
-    <option value="web">Web (HF)</option>
-  </select>
-  <div id="local-picker" style="flex:1;display:flex;gap:6px;align-items:center;">
-    <button onclick="openBrowser()" style="background:var(--bg3);color:var(--text);border:1px solid var(--border);white-space:nowrap;">Browse...</button>
-    <span id="picked-file" style="flex:1;font-size:12px;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">No file selected</span>
-  </div>
-  <input id="inp" style="display:none;flex:1;" placeholder="HuggingFace URL (.gguf or .safetensors)" />
+  <button onclick="openBrowser()" style="background:var(--bg3);color:var(--text);border:1px solid var(--border);white-space:nowrap;">Browse...</button>
+  <span id="picked-file" style="flex:1;font-size:12px;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">No file selected</span>
   <button onclick="load()">Load</button>
   <span class="st" id="status"></span>
 </div>
@@ -143,13 +136,6 @@
 
 <script>
 let S = { path:'', blocks:[], blk:null, tensor:null, page:0, ps:500, data:null, browseDir:'.' };
-const mode = () => document.getElementById('mode').value;
-
-function modeChanged() {
-  const m = mode();
-  $('local-picker').style.display = m === 'local' ? 'flex' : 'none';
-  $('inp').style.display = m === 'web' ? 'block' : 'none';
-}
 
 async function openBrowser(dir) {
   dir = dir || S.browseDir;
@@ -190,8 +176,7 @@ function pickFile(path) {
 document.addEventListener('click', e => { if (e.target === $('fb-overlay')) closeBrowser(); });
 
 async function load() {
-  if (mode() === 'web') S.path = $('inp').value.trim();
-  if (!S.path) { if (mode() === 'local') openBrowser(); return; }
+  if (!S.path) { openBrowser(); return; }
   S.blk = null; S.tensor = null;
   stat('Loading header...');
   const r = await api('/api/open?path=' + enc(S.path));
@@ -241,7 +226,7 @@ async function fetchPage() {
   ct.innerHTML = '<div class="loading-bar"></div>';
   stat('Fetching tensor...');
   const off = S.page * S.ps;
-  const d = await api(`/api/tensor?path=${enc(S.path)}&name=${enc(S.tensor)}&offset=${off}&limit=${S.ps}&mode=${mode()}`);
+  const d = await api(`/api/tensor?path=${enc(S.path)}&name=${enc(S.tensor)}&offset=${off}&limit=${S.ps}`);
   if (!d) { ct.innerHTML = '<div class="empty">Failed to load tensor</div>'; return; }
   S.data = d;
   stat('');
@@ -374,15 +359,14 @@ function drawHist(id, hist) {
   }
 }
 
-// Auto-load
+// Auto-load from ?f= query param
 const q = new URLSearchParams(location.search);
-if (q.get('m')) { $('mode').value = q.get('m'); modeChanged(); }
 if (q.get('f')) {
   S.path = q.get('f');
-  if (mode() === 'web') $('inp').value = q.get('f');
-  else { $('picked-file').textContent = q.get('f').split('/').pop(); $('picked-file').title = q.get('f'); }
+  $('picked-file').textContent = q.get('f').split('/').pop();
+  $('picked-file').title = q.get('f');
   load();
-} else { modeChanged(); }
+}
 </script>
 </body>
 </html>
