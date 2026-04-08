@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tensor Viewer</title>
+<style>
+  :root {
+    --bg: #FAF6F1; --bg2: #FFFFFF; --bg3: #F3EDE4;
+    --border: #E5DDD3; --border2: #D9CEBC;
+    --text: #2D2B28; --text2: #6B6560; --text3: #9B9388;
+    --accent: #C96442; --accent2: #E07A55; --accentbg: #FDF0EB;
+    --green: #4A8C5C; --greenbg: #EDF5EF;
+    --blue: #4A6FA5; --bluebg: #EDF1F8;
+    --red: #C44D3F; --redbg: #FCEDEB;
+    --mono: 'SF Mono', 'Fira Code', Consolas, monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); font-size: 13px; }
+
+  .bar {
+    background: var(--bg2); border-bottom: 1px solid var(--border); padding: 10px 16px;
+    display: flex; gap: 8px; align-items: center; position: sticky; top: 0; z-index: 100;
+  }
+  .bar input {
+    flex: 1; background: var(--bg3); border: 1px solid var(--border); padding: 7px 12px;
+    border-radius: 8px; font-size: 13px; color: var(--text); font-family: inherit;
+  }
+  .bar select {
+    background: var(--bg2); border: 1px solid var(--border); padding: 7px 10px;
+    border-radius: 8px; font-size: 12px; color: var(--text); cursor: pointer;
+  }
+  .bar button {
+    background: var(--accent); color: #fff; border: none; padding: 7px 20px;
+    border-radius: 8px; font-size: 13px; cursor: pointer; font-weight: 500;
+  }
+  .bar button:hover { background: var(--accent2); }
+  .bar .st { font-size: 11px; color: var(--text3); }
+
+  .wrap { display: flex; height: calc(100vh - 50px); }
+
+  .left {
+    width: 230px; min-width: 230px; background: var(--bg2);
+    border-right: 1px solid var(--border); overflow-y: auto;
+  }
+  .left h2 {
+    font-size: 10px; font-weight: 700; color: var(--text3); text-transform: uppercase;
+    letter-spacing: 0.8px; padding: 14px 12px 6px; position: sticky; top: 0; background: var(--bg2);
+  }
+  .bi {
+    padding: 7px 12px; cursor: pointer; border-left: 3px solid transparent;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .bi:hover { background: var(--bg3); }
+  .bi.on { background: var(--accentbg); border-left-color: var(--accent); }
+  .bi .n { font-weight: 500; font-size: 13px; }
+  .bi .m { font-size: 11px; color: var(--text3); }
+
+  .right { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+  .tabs {
+    background: var(--bg2); border-bottom: 1px solid var(--border);
+    display: flex; flex-wrap: wrap; min-height: 38px; overflow-x: auto;
+  }
+  .tab {
+    padding: 9px 14px; cursor: pointer; font-size: 12px; white-space: nowrap;
+    border-bottom: 2px solid transparent; color: var(--text3);
+  }
+  .tab:hover { color: var(--text); background: var(--bg3); }
+  .tab.on { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+
+  .tg { display: inline-block; padding: 1px 5px; border-radius: 4px; font-size: 10px; font-weight: 600; margin-right: 3px; }
+  .tg-NVFP4 { background: var(--greenbg); color: var(--green); }
+  .tg-BF16 { background: #FFF5E0; color: #8B6914; }
+  .tg-F32 { background: var(--bluebg); color: var(--blue); }
+  .tg-F16 { background: #F3E8FA; color: #6B3FA0; }
+
+  .ct { flex: 1; overflow-y: auto; padding: 16px; }
+
+  .card { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 14px; margin-bottom: 14px; }
+  .card h3 { font-size: 13px; font-weight: 600; margin-bottom: 8px; color: var(--text); }
+  .row { display: flex; flex-wrap: wrap; gap: 6px; }
+  .s { background: var(--bg3); border-radius: 6px; padding: 5px 9px; }
+  .s .l { font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: 0.3px; }
+  .s .v { font-size: 13px; font-weight: 500; }
+
+  canvas { width: 100%; display: block; }
+
+  /* Value grid */
+  .gw { max-height: 320px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
+  table.vg { width: 100%; border-collapse: collapse; font-size: 11px; font-family: var(--mono); }
+  table.vg th { background: var(--bg3); position: sticky; top: 0; padding: 4px 6px; text-align: right; font-weight: 500; color: var(--text3); border-bottom: 1px solid var(--border); }
+  table.vg td { padding: 3px 6px; border-bottom: 1px solid #F5F0E8; text-align: right; }
+  table.vg tr:hover td { background: var(--bg3); }
+  .neg { color: var(--red); }
+  .zero { color: var(--text3); }
+  .pos { color: var(--text); }
+  .pg { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+  .pg button { background: var(--bg3); border: 1px solid var(--border); padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+  .pg button:hover { background: var(--border); }
+  .pg span { font-size: 12px; color: var(--text3); }
+
+  .empty { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text3); }
+  .loading-bar { height: 3px; background: var(--accent); animation: pulse 1s infinite; border-radius: 2px; }
+  @keyframes pulse { 0%,100% { opacity: 0.4; } 50% { opacity: 1; } }
+</style>
+</head>
+<body>
+
+<div class="bar">
+  <select id="mode" onchange="modeChanged()">
+    <option value="local">Local</option>
+    <option value="web">Web (HF)</option>
+  </select>
+  <div id="local-picker" style="flex:1;display:flex;gap:6px;align-items:center;">
+    <button onclick="openBrowser()" style="background:var(--bg3);color:var(--text);border:1px solid var(--border);white-space:nowrap;">Browse...</button>
+    <span id="picked-file" style="flex:1;font-size:12px;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">No file selected</span>
+  </div>
+  <input id="inp" style="display:none;flex:1;" placeholder="HuggingFace URL (.gguf or .safetensors)" />
+  <button onclick="load()">Load</button>
+  <span class="st" id="status"></span>
+</div>
+
+<!-- File browser overlay -->
+<div id="fb-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.3); z-index:200; display:none; align-items:center; justify-content:center;">
+  <div id="fb-panel" style="background:var(--bg2); border:1px solid var(--border); border-radius:12px; width:520px; max-height:70vh; display:flex; flex-direction:column; box-shadow:0 8px 32px rgba(0,0,0,0.15);">
+    <div style="padding:12px 16px; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center;">
+      <div style="font-weight:600; font-size:14px;">Select Model File</div>
+      <button onclick="closeBrowser()" style="background:none;border:none;font-size:18px;cursor:pointer;color:var(--text2);padding:0 4px;">&times;</button>
+    </div>
+    <div id="fb-path" style="padding:6px 16px; font-size:11px; color:var(--text3); border-bottom:1px solid var(--bg3); font-family:var(--mono);"></div>
+    <div id="fb-list" style="flex:1; overflow-y:auto; padding:4px 0;"></div>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="left" id="lp"><h2>Blocks</h2><div class="empty" style="height:100px;font-size:12px">Load a file</div></div>
+  <div class="right">
+    <div class="tabs" id="tabs"></div>
+    <div class="ct" id="ct"><div class="empty">Select a block, then a tensor</div></div>
+  </div>
+</div>
+
+<script>
+let S = { path:'', blocks:[], blk:null, tensor:null, page:0, ps:500, data:null, browseDir:'.' };
+const mode = () => document.getElementById('mode').value;
+
+function modeChanged() {
+  const m = mode();
+  $('local-picker').style.display = m === 'local' ? 'flex' : 'none';
+  $('inp').style.display = m === 'web' ? 'block' : 'none';
+}
+
+async function openBrowser(dir) {
+  dir = dir || S.browseDir;
+  const ov = $('fb-overlay');
+  ov.style.display = 'flex';
+  $('fb-list').innerHTML = '<div style="padding:20px;color:var(--text3);text-align:center">Loading...</div>';
+  const r = await api('/api/browse?dir=' + enc(dir));
+  if (!r) { closeBrowser(); return; }
+  S.browseDir = r.dir;
+  $('fb-path').textContent = r.dir;
+  let h = '';
+  for (const item of r.items) {
+    if (item.type === 'dir') {
+      const opacity = item.name === '..' || item.has_gguf ? '1' : '0.5';
+      h += `<div onclick="openBrowser('${item.path.replace(/'/g, "\\'")}')" style="padding:7px 16px;cursor:pointer;display:flex;align-items:center;gap:8px;opacity:${opacity};" onmouseenter="this.style.background='var(--bg3)'" onmouseleave="this.style.background=''">
+        <span style="font-size:16px">&#128193;</span><span style="font-weight:500">${item.name}</span></div>`;
+    } else {
+      h += `<div onclick="pickFile('${item.path.replace(/'/g, "\\'")}')" style="padding:7px 16px;cursor:pointer;display:flex;align-items:center;justify-content:space-between;" onmouseenter="this.style.background='var(--accentbg)'" onmouseleave="this.style.background=''">
+        <div style="display:flex;align-items:center;gap:8px;"><span style="font-size:16px">&#128196;</span><span style="font-weight:500">${item.name}</span></div>
+        <span style="font-size:11px;color:var(--text3)">${item.size_str}</span></div>`;
+    }
+  }
+  if (!r.items.some(i => i.type === 'file') && !r.items.some(i => i.type === 'dir' && i.name !== '..'))
+    h += '<div style="padding:20px;color:var(--text3);text-align:center;font-size:12px">No model files here</div>';
+  $('fb-list').innerHTML = h;
+}
+
+function closeBrowser() { $('fb-overlay').style.display = 'none'; }
+
+function pickFile(path) {
+  S.path = path;
+  $('picked-file').textContent = path.split('/').pop();
+  $('picked-file').title = path;
+  closeBrowser();
+  load();
+}
+
+document.addEventListener('click', e => { if (e.target === $('fb-overlay')) closeBrowser(); });
+
+async function load() {
+  if (mode() === 'web') S.path = $('inp').value.trim();
+  if (!S.path) { if (mode() === 'local') openBrowser(); return; }
+  S.blk = null; S.tensor = null;
+  stat('Loading header...');
+  const r = await api('/api/open?path=' + enc(S.path));
+  if (!r) return;
+  S.blocks = r.blocks;
+  stat(r.n_tensors + ' tensors');
+  renderBlocks();
+  $('tabs').innerHTML = '';
+  $('ct').innerHTML = '<div class="empty">Select a block</div>';
+}
+
+function renderBlocks() {
+  let h = '<h2>Blocks</h2>';
+  for (const b of S.blocks) {
+    const on = S.blk === b.name ? ' on' : '';
+    const mb = (b.total_bytes/1048576).toFixed(1);
+    const tags = Object.entries(b.types).map(([t,n]) => `<span class="tg tg-${t}">${n}</span>`).join('');
+    h += `<div class="bi${on}" onclick="pickBlock('${b.name}')">
+      <div><div class="n">${b.name}</div><div class="m">${tags}</div></div>
+      <div class="m">${mb}M</div></div>`;
+  }
+  $('lp').innerHTML = h;
+}
+
+function pickBlock(name) {
+  S.blk = name; S.tensor = null; renderBlocks();
+  const b = S.blocks.find(x => x.name === name);
+  if (!b) return;
+  let h = '';
+  for (const t of b.tensors) {
+    if (t.suffix.endsWith('.scale') || t.suffix.endsWith('.input_scale')) continue;
+    h += `<div class="tab" data-t="${t.name}" onclick="pickTensor('${t.name}')">
+      <span class="tg tg-${t.type}">${t.type}</span>${t.suffix}</div>`;
+  }
+  $('tabs').innerHTML = h;
+  $('ct').innerHTML = '<div class="empty">Select a tensor</div>';
+}
+
+async function pickTensor(name) {
+  S.tensor = name; S.page = 0;
+  document.querySelectorAll('.tab').forEach(el => el.classList.toggle('on', el.dataset.t === name));
+  await fetchPage();
+}
+
+async function fetchPage() {
+  const ct = $('ct');
+  ct.innerHTML = '<div class="loading-bar"></div>';
+  stat('Fetching tensor...');
+  const off = S.page * S.ps;
+  const d = await api(`/api/tensor?path=${enc(S.path)}&name=${enc(S.tensor)}&offset=${off}&limit=${S.ps}&mode=${mode()}`);
+  if (!d) { ct.innerHTML = '<div class="empty">Failed to load tensor</div>'; return; }
+  S.data = d;
+  stat('');
+  render();
+}
+
+function render() {
+  const d = S.data, s = d.stats;
+  let h = '';
+
+  // Stats
+  const sigma3 = s.std ? s.std * 3 : 0;
+  const outlierPct = d.outlier_pct != null ? d.outlier_pct.toFixed(2) + '%' : '-';
+  const sparsePct = d.sparse_pct != null ? d.sparse_pct.toFixed(1) + '%' : '-';
+  h += `<div class="card"><h3>${d.name} <span class="tg tg-${d.type}">${d.type}</span> ${d.shape.join(' x ')} (${d.total_elements.toLocaleString()} elements)</h3>
+  <div class="row">
+    ${st('Mean',f(s.mean))}${st('Std',f(s.std))}${st('Min',f(s.min))}${st('Max',f(s.max))}${st('Zeros',s.zero_pct.toFixed(1)+'%')}${st('Sparse',sparsePct)}${st('Outliers',outlierPct)}
+  </div></div>`;
+
+  // Histogram
+  h += `<div class="card"><h3>Distribution</h3><canvas id="cv" style="height:320px"></canvas></div>`;
+
+  // Value grid
+  const off = d.offset, total = d.total_elements;
+  const ncols = Math.min(16, total);
+  h += `<div class="card"><h3>Values (${off.toLocaleString()}..${Math.min(off+d.values.length,total).toLocaleString()} of ${total.toLocaleString()})</h3>`;
+  h += '<div class="gw"><table class="vg"><thead><tr><th>#</th>';
+  for (let c = 0; c < ncols; c++) h += `<th>${c}</th>`;
+  h += '</tr></thead><tbody>';
+  for (let i = 0; i < d.values.length; i += ncols) {
+    h += `<tr><td style="color:var(--text3);text-align:left">${off+i}</td>`;
+    for (let c = 0; c < ncols; c++) {
+      const idx = i+c;
+      if (idx < d.values.length) {
+        const v = d.values[idx];
+        const cls = v === 0 ? 'zero' : v < 0 ? 'neg' : 'pos';
+        h += `<td class="${cls}">${fv(v)}</td>`;
+      } else h += '<td></td>';
+    }
+    h += '</tr>';
+  }
+  h += '</tbody></table></div>';
+  const mp = Math.ceil(total/S.ps)-1;
+  h += `<div class="pg">
+    <button onclick="gp(0)">&laquo;</button>
+    <button onclick="gp(${Math.max(0,S.page-1)})">&lsaquo;</button>
+    <span>Page ${S.page+1} / ${mp+1}</span>
+    <button onclick="gp(${Math.min(mp,S.page+1)})">&rsaquo;</button>
+    <button onclick="gp(${mp})">&raquo;</button>
+  </div></div>`;
+
+  $('ct').innerHTML = h;
+  drawHist('cv', d.histogram);
+}
+
+function gp(p) { S.page = p; fetchPage(); }
+function st(l, v) { return `<div class="s"><div class="l">${l}</div><div class="v">${v}</div></div>`; }
+
+// ── Helpers ──
+const $ = id => document.getElementById(id);
+const enc = s => encodeURIComponent(s);
+const stat = s => $('status').textContent = s;
+
+async function api(url) {
+  try {
+    const r = await fetch(url);
+    const d = await r.json();
+    if (d.error) { stat('Error: ' + d.error); return null; }
+    return d;
+  } catch(e) { stat('Error: ' + e); return null; }
+}
+
+function f(v) {
+  if (v == null) return '-';
+  if (v === 0) return '0';
+  const a = Math.abs(v);
+  if (a < 0.0001 || a > 99999) return v.toExponential(3);
+  if (a < 0.01) return v.toFixed(6);
+  return v.toFixed(4);
+}
+function fv(v) {
+  if (v === 0) return '0';
+  const a = Math.abs(v);
+  if (a < 0.0001 || a > 9999) return v.toExponential(2);
+  if (a < 1) return v.toFixed(4);
+  return v.toFixed(2);
+}
+
+function fmtCount(n) {
+  if (n >= 1e6) return (n/1e6).toFixed(1)+'M';
+  if (n >= 1e3) return (n/1e3).toFixed(0)+'k';
+  return n.toString();
+}
+
+// ── Canvas ──
+function setup(id) {
+  const c = $(id); if (!c) return null;
+  const x = c.getContext('2d'), dp = devicePixelRatio||1, r = c.getBoundingClientRect();
+  c.width = r.width*dp; c.height = r.height*dp; x.scale(dp,dp);
+  return {x, W:r.width, H:r.height};
+}
+
+function drawHist(id, hist) {
+  const s = setup(id); if (!s) return;
+  const {x,W,H} = s, {counts,edges} = hist;
+  const mx = Math.max(...counts); if (!mx) return;
+  const p={l:48,r:6,t:6,b:34}, cw=W-p.l-p.r, ch=H-p.t-p.b, bw=cw/counts.length;
+  for (let i=0;i<counts.length;i++) {
+    if (!counts[i]) continue;
+    const h=counts[i]/mx*ch;
+    x.fillStyle='#C96442'; x.globalAlpha=0.55;
+    x.fillRect(p.l+i*bw,p.t+ch-h,Math.max(bw-.5,1),h);
+  }
+  x.globalAlpha=1;
+  // Axes
+  x.strokeStyle='#E5DDD3'; x.beginPath();
+  x.moveTo(p.l,p.t); x.lineTo(p.l,p.t+ch); x.lineTo(p.l+cw,p.t+ch); x.stroke();
+  // X labels
+  x.fillStyle='#9B9388'; x.font='10px -apple-system,sans-serif'; x.textAlign='center';
+  for (let i=0;i<=5;i++) {
+    const idx=Math.floor(i/5*(edges.length-1));
+    x.fillText(f(edges[idx]),p.l+idx/(edges.length-1)*cw,p.t+ch+14);
+  }
+  // Y labels
+  x.textAlign='right';
+  for (let i=0;i<=3;i++) {
+    const v = Math.round(mx * i / 3);
+    const y = p.t + ch - (i/3) * ch;
+    x.fillText(fmtCount(v), p.l-4, y+3);
+  }
+}
+
+// Auto-load
+const q = new URLSearchParams(location.search);
+if (q.get('m')) { $('mode').value = q.get('m'); modeChanged(); }
+if (q.get('f')) {
+  S.path = q.get('f');
+  if (mode() === 'web') $('inp').value = q.get('f');
+  else { $('picked-file').textContent = q.get('f').split('/').pop(); $('picked-file').title = q.get('f'); }
+  load();
+} else { modeChanged(); }
+</script>
+</body>
+</html>
